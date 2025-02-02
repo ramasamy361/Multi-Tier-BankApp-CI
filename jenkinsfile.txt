@@ -1,0 +1,116 @@
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'DOCKER_TAG', defaultValue: 'latest', description: 'Docker tag')
+    }
+    
+    tools {
+        maven 'maven3'
+    }
+    
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+    }
+
+    stages {
+        stage('Git checkout') {
+            steps {
+                git branch: 'main', credentialsId: 'git-cred', url: 'https://github.com/ramasamy361/Multi-Tier-BankApp-CI.git'
+            }
+        }
+        
+        stage('compile') {
+            steps {
+                sh "mvn compile"
+            }
+        }
+        
+        stage('test') {
+            steps {
+                sh "mvn test -DskipTests=true"
+            }
+        }
+        
+        stage('File System Scan') {
+            steps {
+                sh "trivy fs --format table -o fs.html ."
+            }
+        }
+        
+        stage('Sonar Analysis') {
+            steps {
+                withSonarQubeEnv('sonar') {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=bankapp -Dsonar.projectKey=bankapp \
+                        -Dsonar.java.binaries=target ''' 
+                }
+            }
+        }
+        
+        stage('Building & publish Nexus') {
+            steps {
+                withMaven(globalMavenSettingsConfig: 'maven-setting-devops', jdk: '', maven: 'maven3', mavenSettingsConfig: '', traceability: true) {
+                    sh "mvn clean deploy -X -DskipTests=true"
+                }
+            }
+        }
+        
+        stage('Docker Build & Tag') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-cred') {
+                        sh "docker build -t ram1844/bankapp:${params.DOCKER_TAG} ."
+                    }
+                }
+            }
+        }
+        
+        stage('Docker Image Scan') {
+            steps {
+                sh "trivy image --format table -o dimage.html ram1844/bankapp:${params.DOCKER_TAG}"
+            }
+        }
+        
+        stage('Docker push') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-cred') {
+                        sh "docker push ram1844/bankapp:${params.DOCKER_TAG}"
+                    }
+                }
+            }
+        }
+        
+        stage('Update YAML and Push') {
+            steps {
+                script {
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            url: 'https://github.com/ramasamy361/Multi-Tier-BankApp-CD-.git',
+                            credentialsId: 'git-cred'
+                        ]]
+                    ])
+                    
+                    dir('Multi-Tier-BankApp-CD') {
+                        withCredentials([usernamePassword(credentialsId: 'git-cred', 
+                            usernameVariable: 'GIT_USERNAME', 
+                            passwordVariable: 'GIT_PASSWORD')]) {
+                            sh """
+                                git config user.email "jenkins@example.com"
+                                git config user.name "Jenkins"
+                                
+                                git remote set-url origin https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/ramasamy361/Multi-Tier-BankApp-CD-.git
+                                
+                                git add bankapp/bankapp-ds.yml
+                                git commit -m "Update image tag to ${params.DOCKER_TAG}"
+                                git push origin main
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
